@@ -41,3 +41,14 @@ strProcessingSequence
 -> DB
 -> Sequence JSON to CSV (Tpi for email one, we stored the data tu UCIDataservices email ke or what)
 -> Sequence Email we will grasp the data from email ke?
+
+----------------------------------------------------------
+Flow API
+
+- PS_HealthCheck_Receiver
+---> sqEventNameValidation (not touch) --> else (sqDB_QuerySBAConfigMapWithSBATemplateConfigByEventName - not touch)
+---> sq.Processingsequence - sqDB_QueryWSO2SMSBatchMonitoring (Touch) --> SBAUCIFrameworkDataServiceEP (not touch)
+---> sq.emailconstruct - sqEmailTemplateConstructv2 (Touch) --> Read xquerytemplate (xq_generate_html_SMSBatchMonitoring - to be change based on requirement).
+---> sq.SBAHealthCheckProcessingQueueSenderv2 --> Read xq_processingEmailQueuev2_req (touch)
+
+
