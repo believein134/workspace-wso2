@@ -1,0 +1,43 @@
+Scheduler 
+
+-> Proxy Trigger -> PS_HealthCheck
+
+-------------------------------------------------------
+PS_HealthCheck
+
+-> Property group is for just initiliazing.
+
+-> sequence Name Validation
+
+<property expression="$body//eventName/text()" name="strEventName"/> extracted the eventname.
+
+Now the system needs to:
+Check if this eventName is valid
+Decide what to do next
+Load configuration (DB / registry)
+Call correct business sequence
+That’s what sqEventNameValidation does.
+
+propertyGroup -> Read Configmap DB (what is the value)
+
+<sequence key="{$ctx:strProcessingSequence}"/> -> Process the processing sequence we store in db. read from propertyGorup
+            <sequence key="sqEmailTemplateConstructv2"/> -> Process run the email
+			
+            <log level="custom">
+                <property name="PS_HealthCheck_Receiver" value="MID 2"/>
+                <property expression="$ctx:strEmailContent" name="EMAIL CONTENT"/> ->
+                <!-- <property expression="$ctx:strSubject" name="EMAIL SUBJECT"/>
+                <property expression="$ctx:strMessageOriginated" name="MSG_ORIGIN"/>
+                <property expression="$ctx:strMessageTerminated" name="MSG_TERM"/> -->
+            </log>
+
+---------------------------------------------------------
+strProcessingSequence
+
+
+- > Starting Log
+
+-> Proxy
+-> DB
+-> Sequence JSON to CSV (Tpi for email one, we stored the data tu UCIDataservices email ke or what)
+-> Sequence Email we will grasp the data from email ke?
