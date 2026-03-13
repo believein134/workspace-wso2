@@ -1,0 +1,144 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<proxy name="PS_APIMetering_Online" startOnLoad="true" transports="http https" xmlns="http://ws.apache.org/ns/synapse">
+    <target>
+        <inSequence>
+            <!-- DEBUG 1: START + Date Calculation -->
+            <log level="custom">
+                <property name="DEBUG_STEP" value="=== PROXY START ==="/>
+            </log>
+            <script language="js"><![CDATA[var d = new Date();
+d.setDate(d.getDate() - 1);
+
+function pad(n){ return n < 10 ? '0'+n : ''+n; }
+
+var y = d.getFullYear();
+var m = pad(d.getMonth() + 1);
+var day = pad(d.getDate());
+
+var ymd = y + m + day;
+
+mc.setProperty("callDate", ymd);
+mc.setProperty("callTime", "000000");
+mc.setProperty("callEndDate", ymd);
+mc.setProperty("callEndTime", "235959");
+mc.setProperty("timeFrom", y + "-" + m + "-" + day + "T00:00:00.000+08:00");
+mc.setProperty("timeTo", y + "-" + m + "-" + day + "T23:59:59.999+08:00");
+
+var now = new Date();
+var timestamp = now.getFullYear() + pad(now.getMonth()+1) + pad(now.getDate()) + pad(now.getHours()) + pad(now.getMinutes()) + pad(now.getSeconds());
+mc.setProperty("timestamp", timestamp);]]></script>
+            <log level="custom">
+                <property name="DEBUG_STEP" value="STEP 1: Dates calculated"/>
+                <property expression="get-property('callDate')" name="callDate"/>
+                <property expression="get-property('timeFrom')" name="timeFrom"/>
+                <property expression="get-property('timeTo')" name="timeTo"/>
+                <property expression="get-property('timestamp')" name="timestamp"/>
+            </log>
+            <!-- DEBUG 2: Config Properties -->
+            <property name="orgId" scope="default" type="STRING" value="e379bc54-1a05-466d-83a3-f921d51ee6d2"/>
+            <property name="envIdsArray" scope="default" type="STRING" value="[&quot;1c89f011-9380-4d65-9142-75ec8a55dff3&quot;]"/>
+            <log level="custom">
+                <property name="DEBUG_STEP" value="STEP 2: Config loaded"/>
+                <property expression="get-property('orgId')" name="orgId"/>
+                <property expression="get-property('envIdsArray')" name="envIdsArray"/>
+            </log>
+            <property name="messageType" scope="axis2" type="STRING" value="application/json"/>
+            <property name="ContentType" scope="axis2" type="STRING" value="application/json"/>
+            <!-- DEBUG 3: Headers + Payload BEFORE Choreo call -->
+            <header name="Authorization" scope="transport" value="Bearer ..------------"/>
+            <!-- DEBUG 4: GraphQL Payload -->
+            <payloadFactory media-type="json">
+                <format>{ "query": "query ($dataFilter: DataFilter!, $timeFilter: TimeFilter!, $apiUsageByAppFilter: APIUsageByAppFilter!) { getAPIsUsageByApplications(timeFilter: $timeFilter, apiUsageByAppFilter: $apiUsageByAppFilter, dataFilter: $dataFilter) { apiId applicationId applicationName applicationOwner count errorCount } }", "variables": { "timeFilter": { "from": "$1", "to": "$2" }, "apiUsageByAppFilter": { "apiIds": [], "appIds": [], "subscribers": [] }, "dataFilter": { "orgId": "$3", "environmentIds": $4, "tenant": "tm.com.my" } } }</format>
+                <args>
+                    <arg evaluator="xml" expression="get-property('timeFrom')"/>
+                    <arg evaluator="xml" expression="get-property('timeTo')"/>
+                    <arg evaluator="xml" expression="get-property('orgId')"/>
+                    <arg evaluator="xml" expression="get-property('envIdsArray')"/>
+                </args>
+            </payloadFactory>
+            <log level="custom">
+                <property name="DEBUG_STEP" value="STEP 3: GraphQL payload ready"/>
+            </log>
+            <!-- DEBUG 5: BEFORE Choreo call -->
+            <log level="custom">
+                <property name="DEBUG_STEP" value="STEP 4: Calling Choreo API..."/>
+            </log>
+            <call>
+                <endpoint>
+                    <http method="post" uri-template="">
+                        <suspendOnFailure>
+                            <initialDuration>-1</initialDuration>
+                            <progressionFactor>1</progressionFactor>
+                        </suspendOnFailure>
+                        <markForSuspension>
+                            <retriesBeforeSuspension>0</retriesBeforeSuspension>
+                        </markForSuspension>
+                    </http>
+                </endpoint>
+            </call>
+            <!-- DEBUG 6: AFTER Choreo response -->
+            <log level="custom">
+                <property name="DEBUG_STEP" value="STEP 5: Choreo response received"/>
+                <property expression="get-property('axis2.request')" name="request"/>
+                <property expression="$body" name="responseBody"/>
+            </log>
+            <!-- DEBUG 7: JSON Processing -->
+            <script language="js"><![CDATA[try { var jsonPayload = mc.getPayloadJSON(); var usages = []; if (jsonPayload.data && jsonPayload.data.getAPIsUsageByApplications) { usages = jsonPayload.data.getAPIsUsageByApplications; } var rows = []; var callDate = mc.getProperty("callDate") || "YYYYMMDD"; var callEndDate = mc.getProperty("callEndDate") || "YYYYMMDD"; for (var i = 0; i < usages.length; i = i + 1) { var r = usages[i]; var row = [callDate, "000000", String(r.count || 0), "HITS", r.applicationOwner || "", r.applicationName || "", r.applicationId || "", r.apiId || "", callEndDate, "235959", "API", "API", "", "", "MYR", "", "N", "API"].join("|"); rows.push(row); } mc.setProperty("HAS_DATA", rows.length > 0 ? "true" : "false"); mc.setProperty("CSV_ROWS", rows.join("\n")); mc.setProperty("ROW_COUNT", rows.length); } catch(e) { mc.getServiceLog().error("JSON processing error: " + e.message); mc.setProperty("HAS_DATA", "false"); mc.setProperty("ERROR_MSG", e.message); }]]></script>
+            <log level="custom">
+                <property name="DEBUG_STEP" value="STEP 6: JSON processed"/>
+                <property expression="get-property('HAS_DATA')" name="HAS_DATA"/>
+                <property expression="get-property('ROW_COUNT')" name="ROW_COUNT"/>
+                <property expression="get-property('ERROR_MSG')" name="ERROR_MSG"/>
+            </log>
+            <!-- DEBUG 8: CSV Generation -->
+            <filter regex="true" source="get-property('HAS_DATA')">
+                <then>
+                    <log level="custom">
+                        <property name="DEBUG_STEP" value="STEP 7: Generating CSV..."/>
+                    </log>
+                    <payloadFactory media-type="text">
+                        <format>
+							callDate|callTime|elapsUnit|elapsUom|sourceIdentifier|customField1|customField2|destinationIdentifier|callEndDate|callEndTime|callType|serviceType|customField7|charge|currency|customField6|preRatedIndicator|cdrType
+							$1
+						</format>
+                        <args>
+                            <arg evaluator="xml" expression="get-property('CSV_ROWS')"/>
+                        </args>
+                    </payloadFactory>
+                    <property expression="fn:concat('CDR_API_', get-property('callDate'), '_', get-property('timestamp'), '.csv')" name="fileName" scope="default" type="STRING"/>
+                    <log level="custom">
+                        <property name="DEBUG_STEP" value="STEP 8: Writing file"/>
+                        <property expression="get-property('fileName')" name="fileName"/>
+                    </log>
+                    <!-- Send to folder -->
+                    <send>
+                        <endpoint>
+                            <address uri="vfs:file:///C:/Users/MuhammadNabilBinRusl/temp/${fileName}">
+                                <suspendOnFailure>
+                                    <initialDuration>-1</initialDuration>
+                                    <progressionFactor>1</progressionFactor>
+                                </suspendOnFailure>
+                                <markForSuspension>
+                                    <retriesBeforeSuspension>0</retriesBeforeSuspension>
+                                </markForSuspension>
+                            </address>
+                        </endpoint>
+                    </send>
+                </then>
+                <else>
+                    <log level="custom">
+                        <property name="DEBUG_STEP" value="STEP 9: No data found"/>
+                    </log>
+                </else>
+            </filter>
+        </inSequence>
+        <outSequence>
+            <log level="custom">
+                <property name="DEBUG_FINAL" value="=== PROXY COMPLETED ==="/>
+            </log>
+        </outSequence>
+        <faultSequence>
+            <drop/>
+        </faultSequence>
+    </target>
+</proxy>
