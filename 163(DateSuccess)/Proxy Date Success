@@ -1,0 +1,184 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<proxy name="PS_APIMetering_Enhance" startOnLoad="true" transports="http https" xmlns="http://ws.apache.org/ns/synapse">
+    <target>
+        <inSequence>
+            <!-- DEBUG 1: START + Date Calculation -->
+            <log level="custom">
+                <property name="DEBUG_STEP" value="=== PROXY START ==="/>
+            </log>
+            <property name="callDate"
+          		expression="get-property('SYSTEM_DATE','yyyyMMdd')"
+          		scope="default"
+          		type="STRING"/>
+
+			<property name="callEndDate"
+          		expression="get-property('SYSTEM_DATE','yyyyMMdd')"
+          		scope="default"
+          		type="STRING"/>
+
+			<!-- Fixed times -->
+			<property name="callTime" value="000000" scope="default"/>
+			<property name="callEndTime" value="235959" scope="default"/>
+
+			<!-- ISO timestamps -->
+			<property name="timeFrom"
+          		expression="fn:concat(get-property('SYSTEM_DATE','yyyy-MM-dd'),'T00:00:00.000+08:00')"
+          		scope="default"/>
+
+			<property name="timeTo"
+          		expression="fn:concat(get-property('SYSTEM_DATE','yyyy-MM-dd'),'T23:59:59.999+08:00')"
+          		scope="default"/>
+
+			<!-- Timestamp for filename -->
+			<property name="timestamp"
+          		expression="get-property('SYSTEM_DATE','yyyyMMddHHmmss')"
+          		scope="default"
+          		type="STRING"/>
+          		
+            <log level="custom">
+                <property name="DEBUG_STEP" value="STEP 1: Dates calculated"/>
+                <property expression="get-property('callDate')" name="callDate"/>
+                <property expression="get-property('timeFrom')" name="timeFrom"/>
+                <property expression="get-property('timeTo')" name="timeTo"/>
+                <property expression="get-property('timestamp')" name="timestamp"/>
+            </log>
+            <!-- DEBUG 2: Config Properties -->
+            <property name="orgId" scope="default" type="STRING" value="e379bc54-1a05-466d-83a3-f921d51ee6d2"/>
+            <property name="envIdsArray" scope="default" type="STRING" value="[&quot;1c89f011-9380-4d65-9142-75ec8a55dff3&quot;]"/>
+            <log level="custom">
+                <property name="DEBUG_STEP" value="STEP 2: Config loaded"/>
+                <property expression="get-property('orgId')" name="orgId"/>
+                <property expression="get-property('envIdsArray')" name="envIdsArray"/>
+            </log>
+            <!-- DEBUG 4: GraphQL Payload -->
+            <call-template target="ChoreoAuthTokenRetriever"/>
+            
+            <filter xpath="not($ctx:accessToken) or $ctx:accessToken = ''">
+                <then>
+                    <log level="custom">
+                        <property name="DEBUG_STEP" value="TOKEN RETRIEVAL FAILED - NO ACCESS TOKEN"/>
+                        <property name="TOKEN_STATUS" expression="$ctx:tokenHttpStatus"/>
+                        <property name="TOKEN_RESPONSE_SNIPPET" expression="substring($ctx:tokenRawResponse, 1, 300)"/>
+                    </log>
+                    <!-- Optional: send alert email / slack here -->
+                    <drop/>
+                </then>
+            </filter>
+            
+            <header name="Authorization" scope="transport" expression="fn:concat('Bearer ', $ctx:accessToken)"/>
+            <property name="messageType" scope="axis2" type="STRING" value="application/json"/>
+            <property name="ContentType" scope="axis2" type="STRING" value="application/json"/>
+            <log level="custom">
+    			<property name="DEBUG_TOKEN" expression="get-property('accessToken')"/>
+			</log>
+            <payloadFactory media-type="json">
+                <format>{ "query": "query ($dataFilter: DataFilter!, $timeFilter: TimeFilter!, $apiUsageByAppFilter: APIUsageByAppFilter!) { getAPIsUsageByApplications(timeFilter: $timeFilter, apiUsageByAppFilter: $apiUsageByAppFilter, dataFilter: $dataFilter) { apiId applicationId applicationName applicationOwner count errorCount } }", "variables": { "timeFilter": { "from": "$1", "to": "$2" }, "apiUsageByAppFilter": { "apiIds": [], "appIds": [], "subscribers": [] }, "dataFilter": { "orgId": "$3", "environmentIds": $4, "tenant": "tm.com.my" } } }</format>
+                <args>
+                    <arg evaluator="xml" expression="get-property('timeFrom')"/>
+                    <arg evaluator="xml" expression="get-property('timeTo')"/>
+                    <arg evaluator="xml" expression="get-property('orgId')"/>
+                    <arg evaluator="xml" expression="get-property('envIdsArray')"/>
+                </args>
+            </payloadFactory>
+            <log level="custom">
+                <property name="DEBUG_STEP" value="STEP 3: GraphQL pay	load ready"/>
+            </log>
+            <!-- DEBUG 5: BEFORE Choreo call -->
+            <log level="custom">
+                <property name="DEBUG_STEP" value="STEP 4: Calling Choreo API..."/>
+            </log>
+            <call>
+                <endpoint>
+                    <http method="post" uri-template="https://choreocontrolplane.choreo.dev/93tu/insights/1.0.0/query-api">
+                        <suspendOnFailure>
+                            <initialDuration>-1</initialDuration>
+                            <progressionFactor>1</progressionFactor>
+                        </suspendOnFailure>
+                        <markForSuspension>
+                            <retriesBeforeSuspension>0</retriesBeforeSuspension>
+                        </markForSuspension>
+                    </http>
+                </endpoint>
+            </call>
+            <!-- DEBUG 6: AFTER Choreo response -->
+            <log level="custom">
+                <property name="DEBUG_STEP" value="STEP 5: Choreo response received"/>
+                <property expression="get-property('axis2.request')" name="request"/>
+                <property expression="$body" name="responseBody"/>
+            </log>
+            <!-- DEBUG 7: JSON Processing -->
+            <script language="js"><![CDATA[try { var jsonPayload = mc.getPayloadJSON(); var usages = []; if (jsonPayload.data && jsonPayload.data.getAPIsUsageByApplications) { usages = jsonPayload.data.getAPIsUsageByApplications; } var rows = []; var callDate = mc.getProperty("callDate") || "YYYYMMDD"; var callEndDate = mc.getProperty("callEndDate") || "YYYYMMDD"; for (var i = 0; i < usages.length; i = i + 1) { var r = usages[i]; var row = [callDate, "000000", String(r.count || 0), "HITS", r.applicationOwner || "", r.applicationName || "", r.applicationId || "", r.apiId || "", callEndDate, "235959", "API", "API", "", "", "MYR", "", "N", "API"].join("|"); rows.push(row); } mc.setProperty("HAS_DATA", rows.length > 0 ? "true" : "false"); mc.setProperty("CSV_ROWS", rows.join("\n")); mc.setProperty("ROW_COUNT", rows.length); } catch(e) { mc.getServiceLog().error("JSON processing error: " + e.message); mc.setProperty("HAS_DATA", "false"); mc.setProperty("ERROR_MSG", e.message); }]]></script>
+            <log level="custom">
+                <property name="DEBUG_STEP" value="STEP 6: JSON processed"/>
+                <property expression="get-property('HAS_DATA')" name="HAS_DATA"/>
+                <property expression="get-property('ROW_COUNT')" name="ROW_COUNT"/>
+                <property expression="get-property('ERROR_MSG')" name="ERROR_MSG"/>
+            </log>
+            <!-- DEBUG 8: CSV Generation -->
+            <filter regex="true" source="get-property('HAS_DATA')">
+                <then>
+                    <log level="custom">
+                        <property name="DEBUG_STEP" value="STEP 7: Generating CSV..."/>
+                    </log>
+                    <payloadFactory media-type="text">
+                        <format>
+							callDate|callTime|elapsUnit|elapsUom|sourceIdentifier|customField1|customField2|destinationIdentifier|callEndDate|callEndTime|callType|serviceType|customField7|charge|currency|customField6|preRatedIndicator|cdrType
+							$1
+						</format>
+                        <args>
+                            <arg evaluator="xml" expression="get-property('CSV_ROWS')"/>
+                        </args>
+                    </payloadFactory>
+                    <property expression="fn:concat('Choreo_APIMetering_HOBS_', get-property('timestamp'), '.csv')" name="fileName" scope="default" type="STRING"/>
+                    <log level="custom">
+                        <property name="DEBUG_STEP" value="STEP 8: Writing file"/>
+                        <property expression="get-property('fileName')" name="fileName"/>
+                    </log>
+                    <!-- Send to folder -->
+                    <send>
+                        <endpoint>
+                            <address uri="vfs:file:///C:/Users/MuhammadNabilBinRusl/temp/${fileName}">
+                                <suspendOnFailure>
+                                    <initialDuration>-1</initialDuration>
+                                    <progressionFactor>1</progressionFactor>
+                                </suspendOnFailure>
+                                <markForSuspension>
+                                    <retriesBeforeSuspension>0</retriesBeforeSuspension>
+                                </markForSuspension>
+                            </address>
+                        </endpoint>
+                    </send>
+                </then>
+                <else>
+                    <log level="custom">
+                        <property name="DEBUG_STEP" value="STEP 9: No data found"/>
+                    </log>
+                </else>
+            </filter>
+        </inSequence>
+        <outSequence>
+            <log level="custom">
+                <property name="DEBUG_FINAL" value="=== PROXY COMPLETED ==="/>
+            </log>
+        </outSequence>
+        <faultSequence>
+            <drop/>
+        </faultSequence>
+    </target>
+</proxy>
+
+<!--
+
+[2026-03-16 18:01:00,001]  INFO {LogMediator} - {proxy:PS_APIMetering_Enhance} DEBUG_STEP = === PROXY START ===
+[2026-03-16 18:01:00,003]  INFO {LogMediator} - {proxy:PS_APIMetering_Enhance} DEBUG_STEP = STEP 1: Dates calculated, callDate = 20260316, timeFrom = 2026-03-16T00:00:00.000+08:00, timeTo = 2026-03-16T23:59:59.999+08:00, timestamp = 20260316180100
+[2026-03-16 18:01:00,003]  INFO {LogMediator} - {proxy:PS_APIMetering_Enhance} DEBUG_STEP = STEP 2: Config loaded, orgId = e379bc54-1a05-466d-83a3-f921d51ee6d2, envIdsArray = ["1c89f011-9380-4d65-9142-75ec8a55dff3"]
+[2026-03-16 18:01:00,379]  INFO {LogMediator} - {proxy:PS_APIMetering_Enhance} TOKEN_HTTP_STATUS = 200, TOKEN_RESPONSE = <soapenv:Body xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/"/>
+[2026-03-16 18:01:00,379]  INFO {LogMediator} - {proxy:PS_APIMetering_Enhance} TOKEN_RECEIVED = Access token extracted, ACCESS_TOKEN = eyJ4NXQiOiJZV1kxTm1Sa1pHSTVNekU0T0RCbFpEUmlNV0k0WldKbE5qRXhaV1ZpWmpFek1tTm1ORFUzWVEiLCJraWQiOiJNV1E1TldVd1lXWmlNbU16WlRJek16ZG1NekJoTVdNNFlqUXlNalZoTldNNE5qaGtNR1JtTnpGbE1HSTNaRGxtWW1Rek5tRXlNemhoWWpCaU5tWmhZd19SUzI1NiIsImFsZyI6IlJTMjU2In0.eyJzdWIiOiJlYWExMTQwNC0xMjU5LTQ3N2QtYWU2My03YWRhODIyZjk5ZTAiLCJhdXQiOiJBUFBMSUNBVElPTiIsImNwdCI6dHJ1ZSwiaXNzIjoiaHR0cHM6XC9cL3N0cy5jaG9yZW8uZGV2OjQ0M1wvb2F1dGgyXC90b2tlbiIsImF1ZCI6ImNmMjk3OTJJMGdhZXVYdUxTd3l5SEQwM3pRMGEiLCJuYmYiOjE3NzM2NTUyNjAsImF6cCI6ImNmMjk3OTJJMGdhZXVYdUxTd3l5SEQwM3pRMGEiLCJzY29wZSI6ImFwaW06YXBpX21hbmFnZSIsIm9yZ2FuaXphdGlvbiI6eyJoYW5kbGUiOiJzbWFydGJpemFwaXRtIiwidXVpZCI6ImUzNzliYzU0LTFhMDUtNDY2ZC04M2EzLWY5MjFkNTFlZTZkMiJ9LCJvcmdhbml6YXRpb25zIjpbIjQwMzJiZTUwLTJiZjItNDNkZC1iMmUzLTgyNWRhOGEzMDQwNSIsIjU2NTliNmI3LTEwNjMtNDFlZC04ZTM5LWQ5MTg1NzY5OTI1NSIsImUzNzliYzU0LTFhMDUtNDY2ZC04M2EzLWY5MjFkNTFlZTZkMiIsIjQxYzQzNWZjLWVhODYtNDFiZi1iZjk4LTc3NWFmMmQwNDUxYyJdLCJyZWFsbSI6eyJzaWduaW5nX3RlbmFudCI6ImNhcmJvbi5zdXBlciJ9LCJleHAiOjE3NzM2NTYxNjAsImlhdCI6MTc3MzY1NTI2MCwianRpIjoiMzYwOTVjNTYtOWE4MS00YjA0LWJlYTEtNTQ5ZTRmMjEwMjUzIn0.XFUVVPzBNSg_vkRhbDQlBQ8G3uC6ZdrSBrdG0jjL7oyTc1K-VusEjbIzfvpWZKfGBf0q0elcoYG4FhF49w_QioOJt-OdIS-XFHJygKiHWmKcDIYRiYyVAxgCxXOrQinj3YjgoHb8ncRj5MB8Eg_QV8bShcDV6ZpzZLVFK2amFtgzDLQgkr6ojDd7z5COVf74CtUDnVCcXJn9sG8VnUhj0J_KtmSFX33GM4b6EMxI4nZ95bxPTZovhNNtgB2Cwr8Rdq3fLvWeY9ec_y1AWfRhZj7TVv9cQ3cxxcgzXBkFnhADuOIQpKn5Nn6Hs0PauUND3Xsn2HDycxjnbVyUD6qgmHjL-ukclQ4VpofLJYnNHTyFiZLMzXZ7EgJ66aeGeUjLNMv-qnxCVPw_eS99RRF2QYYWsJa2MnfSO7kiWdyweSaRweLAJ2e09Mbc-edLWIP68j8H4em31QKxmEq1xQ6y5c_e0tnY-sut4yzFaFgo0rcpgmrg0LvKxph5GEVNcZGB8CIPZlpcw5R7QY4QikO5hOl4Z5FMui930zbcGxfPb4iMLKm6HweP4NSG08O2x3fH2QshnmTiqNySDVCxkDkcHHJMziaStoDTGeFoIE9MIg4D4krarxCUyPGI0gWx7WWCkLwSP__i7ROLzG4gWQIM7qxKHZxq0ZKXCRffzOIWLCY
+[2026-03-16 18:01:00,395]  INFO {LogMediator} - {proxy:PS_APIMetering_Enhance} DEBUG_TOKEN = eyJ4NXQiOiJZV1kxTm1Sa1pHSTVNekU0T0RCbFpEUmlNV0k0WldKbE5qRXhaV1ZpWmpFek1tTm1ORFUzWVEiLCJraWQiOiJNV1E1TldVd1lXWmlNbU16WlRJek16ZG1NekJoTVdNNFlqUXlNalZoTldNNE5qaGtNR1JtTnpGbE1HSTNaRGxtWW1Rek5tRXlNemhoWWpCaU5tWmhZd19SUzI1NiIsImFsZyI6IlJTMjU2In0.eyJzdWIiOiJlYWExMTQwNC0xMjU5LTQ3N2QtYWU2My03YWRhODIyZjk5ZTAiLCJhdXQiOiJBUFBMSUNBVElPTiIsImNwdCI6dHJ1ZSwiaXNzIjoiaHR0cHM6XC9cL3N0cy5jaG9yZW8uZGV2OjQ0M1wvb2F1dGgyXC90b2tlbiIsImF1ZCI6ImNmMjk3OTJJMGdhZXVYdUxTd3l5SEQwM3pRMGEiLCJuYmYiOjE3NzM2NTUyNjAsImF6cCI6ImNmMjk3OTJJMGdhZXVYdUxTd3l5SEQwM3pRMGEiLCJzY29wZSI6ImFwaW06YXBpX21hbmFnZSIsIm9yZ2FuaXphdGlvbiI6eyJoYW5kbGUiOiJzbWFydGJpemFwaXRtIiwidXVpZCI6ImUzNzliYzU0LTFhMDUtNDY2ZC04M2EzLWY5MjFkNTFlZTZkMiJ9LCJvcmdhbml6YXRpb25zIjpbIjQwMzJiZTUwLTJiZjItNDNkZC1iMmUzLTgyNWRhOGEzMDQwNSIsIjU2NTliNmI3LTEwNjMtNDFlZC04ZTM5LWQ5MTg1NzY5OTI1NSIsImUzNzliYzU0LTFhMDUtNDY2ZC04M2EzLWY5MjFkNTFlZTZkMiIsIjQxYzQzNWZjLWVhODYtNDFiZi1iZjk4LTc3NWFmMmQwNDUxYyJdLCJyZWFsbSI6eyJzaWduaW5nX3RlbmFudCI6ImNhcmJvbi5zdXBlciJ9LCJleHAiOjE3NzM2NTYxNjAsImlhdCI6MTc3MzY1NTI2MCwianRpIjoiMzYwOTVjNTYtOWE4MS00YjA0LWJlYTEtNTQ5ZTRmMjEwMjUzIn0.XFUVVPzBNSg_vkRhbDQlBQ8G3uC6ZdrSBrdG0jjL7oyTc1K-VusEjbIzfvpWZKfGBf0q0elcoYG4FhF49w_QioOJt-OdIS-XFHJygKiHWmKcDIYRiYyVAxgCxXOrQinj3YjgoHb8ncRj5MB8Eg_QV8bShcDV6ZpzZLVFK2amFtgzDLQgkr6ojDd7z5COVf74CtUDnVCcXJn9sG8VnUhj0J_KtmSFX33GM4b6EMxI4nZ95bxPTZovhNNtgB2Cwr8Rdq3fLvWeY9ec_y1AWfRhZj7TVv9cQ3cxxcgzXBkFnhADuOIQpKn5Nn6Hs0PauUND3Xsn2HDycxjnbVyUD6qgmHjL-ukclQ4VpofLJYnNHTyFiZLMzXZ7EgJ66aeGeUjLNMv-qnxCVPw_eS99RRF2QYYWsJa2MnfSO7kiWdyweSaRweLAJ2e09Mbc-edLWIP68j8H4em31QKxmEq1xQ6y5c_e0tnY-sut4yzFaFgo0rcpgmrg0LvKxph5GEVNcZGB8CIPZlpcw5R7QY4QikO5hOl4Z5FMui930zbcGxfPb4iMLKm6HweP4NSG08O2x3fH2QshnmTiqNySDVCxkDkcHHJMziaStoDTGeFoIE9MIg4D4krarxCUyPGI0gWx7WWCkLwSP__i7ROLzG4gWQIM7qxKHZxq0ZKXCRffzOIWLCY
+[2026-03-16 18:01:00,397]  INFO {LogMediator} - {proxy:PS_APIMetering_Enhance} DEBUG_STEP = STEP 3: GraphQL pay load ready
+[2026-03-16 18:01:00,397]  INFO {LogMediator} - {proxy:PS_APIMetering_Enhance} DEBUG_STEP = STEP 4: Calling Choreo API...
+[2026-03-16 18:01:00,840]  INFO {LogMediator} - {proxy:PS_APIMetering_Enhance} DEBUG_STEP = STEP 5: Choreo response received, request = null, responseBody = <soapenv:Body xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/"/>
+[2026-03-16 18:01:01,345]  INFO {LogMediator} - {proxy:PS_APIMetering_Enhance} DEBUG_STEP = STEP 6: JSON processed, HAS_DATA = true, ROW_COUNT = 242.0, ERROR_MSG = null
+[2026-03-16 18:01:01,347]  INFO {LogMediator} - {proxy:PS_APIMetering_Enhance} DEBUG_STEP = STEP 7: Generating CSV...
+[2026-03-16 18:01:01,347]  INFO {LogMediator} - {proxy:PS_APIMetering_Enhance} DEBUG_STEP = STEP 8: Writing file, fileName = Choreo_APIMetering_HOBS_20260316180100.csv
+-->
