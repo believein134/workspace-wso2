@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<template name="ChoreoAuthTokenRetriever" xmlns="http://ws.apache.org/ns/synapse">
+    <sequence>
+        <property action="remove" name="TRANSPORT_HEADERS" scope="axis2"/>
+        <!-- Set POST payload for OAuth token request -->
+        <payloadFactory media-type="text">
+            <format>grant_type=client_credentials&amp;orgHandle=smartbizapitm&amp;scope=apim:api_manage</format>
+            <args/>
+        </payloadFactory>
+        <!-- Set headers for POST request -->
+        <property name="ContentType" scope="axis2" type="STRING" value="application/x-www-form-urlencoded"/>
+        <header name="Authorization" scope="transport" value="Basic Y2YyOTc5MkkwZ2FldVh1TFN3eXlIRDAzelEwYTpGYUJkT20xNXBPaWNhUVlMT0hhRDNQQ0NXbkVh"/>
+        <!-- Call the OAuth token endpoint -->
+        <call>
+            <endpoint key="ChoreoAuthTokenEP"/>
+        </call>
+        <!-- Capture status & raw response for debugging -->
+        <property name="tokenHttpStatus"   expression="$axis2:HTTP_SC" scope="default"/>
+        <property name="tokenRawResponse"  expression="$body"          scope="default"/>
+
+        <log level="custom">
+            <property name="TOKEN_HTTP_STATUS" expression="$ctx:tokenHttpStatus"/>
+            <property name="TOKEN_RESPONSE"    expression="substring($ctx:tokenRawResponse, 1, 400)"/>
+        </log>
+
+        <!-- Fail if not 200 -->
+        <filter source="$axis2:HTTP_SC" regex="[^2]\d\d">
+            <then>
+                <log level="custom">
+                    <property name="TOKEN_ERROR" value="Token endpoint returned non-2xx status"/>
+                </log>
+                <drop/>
+            </then>
+        </filter>
+
+        <!-- Extract token -->
+        <property name="accessToken" expression="json-eval($.access_token)" scope="default" type="STRING"/>
+
+        <log level="custom">
+            <property name="TOKEN_RECEIVED" value="Access token extracted"/>
+            <property name="ACCESS_TOKEN"    expression="$ctx:accessToken"/>
+        </log>
+    </sequence>
+</template>
