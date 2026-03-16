@@ -10,7 +10,7 @@
         <!-- Set headers for POST request -->
         <property name="messageType" scope="axis2" type="STRING" value="application/x-www-form-urlencoded"/>
         <property name="ContentType" scope="axis2" type="STRING" value="application/x-www-form-urlencoded"/>
-        <header name="Authorization" scope="transport" value="Basic Y2YyOTc5MkkwZ2FldVh1TFN3eXlIRDAzelEwYTpGYUJkT20xNXBPaWNhUVlMT0hhRDNQQ0NXbkVh"/>
+        <header name="Authorization" scope="transport" value="Basic "/>
         <!-- Call the OAuth token endpoint -->
         <call>
             <endpoint key="ChoreoAuthTokenEP"/>
