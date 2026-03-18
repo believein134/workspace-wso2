@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <template name="ChoreoAuthTokenRetriever" xmlns="http://ws.apache.org/ns/synapse">
-    <sequence>
+    <sequence = "sq_AuthTokenRetriever">
         <property action="remove" name="TRANSPORT_HEADERS" scope="axis2"/>
         <!-- Set POST payload for OAuth token request -->
         <payloadFactory media-type="text">
