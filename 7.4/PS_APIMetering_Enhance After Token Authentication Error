@@ -1,0 +1,326 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<proxy name="PS_APIMetering_Enhance" startOnLoad="true" transports="http https" xmlns="http://ws.apache.org/ns/synapse">
+    <target>
+        <inSequence>
+            <!-- DEBUG 1: START + Date Calculation -->
+            <log level="custom">
+                <property name="DEBUG_STEP" value="=== PROXY START ==="/>
+            </log>
+            <property expression="get-property('SYSTEM_DATE','yyyyMMdd')" name="callDate" scope="default" type="STRING"/>
+            <property expression="get-property('SYSTEM_DATE','yyyyMMdd')" name="callEndDate" scope="default" type="STRING"/>
+            <!-- Fixed times -->
+            <property name="callTime" scope="default" type="STRING" value="000000"/>
+            <property name="callEndTime" scope="default" type="STRING" value="235959"/>
+            <!-- ISO timestamps -->
+            <property expression="fn:concat(get-property('SYSTEM_DATE','yyyy-MM-dd'),'T00:00:00.000+08:00')" name="timeFrom" scope="default" type="STRING"/>
+            <property expression="fn:concat(get-property('SYSTEM_DATE','yyyy-MM-dd'),'T23:59:59.999+08:00')" name="timeTo" scope="default" type="STRING"/>
+            <!-- Timestamp for filename -->
+            <property expression="get-property('SYSTEM_DATE','yyyyMMddHHmmss')" name="timestamp" scope="default" type="STRING"/>
+            <log level="custom">
+                <property name="DEBUG_STEP" value="STEP 1: Dates calculated"/>
+                <property expression="get-property('callDate')" name="callDate"/>
+                <property expression="get-property('timeFrom')" name="timeFrom"/>
+                <property expression="get-property('timeTo')" name="timeTo"/>
+                <property expression="get-property('timestamp')" name="timestamp"/>
+            </log>
+            <!-- DEBUG 2: Config Properties -->
+            <property name="orgId" scope="default" type="STRING" value="e379bc54-1a05-466d-83a3-f921d51ee6d2"/>
+            <property name="envIdsArray" scope="default" type="STRING" value="[&quot;1c89f011-9380-4d65-9142-75ec8a55dff3&quot;]"/>
+            <log level="custom">
+                <property name="DEBUG_STEP" value="STEP 2: Config loaded"/>
+                <property expression="get-property('orgId')" name="orgId"/>
+                <property expression="get-property('envIdsArray')" name="envIdsArray"/>
+            </log>
+            <!-- DEBUG 4: Handle token caching and retrieval -->
+            <property expression="get-property('registry', 'conf:/choreoAccessToken')" name="cachedToken" scope="default" type="STRING"/>
+            <filter xpath="not($ctx:cachedToken) or $ctx:cachedToken = ''">
+                <then>
+                    <log level="custom">
+                        <property name="DEBUG_STEP" value="No cached token. Retrieving a new one..."/>
+                    </log>
+                    <call-template target="ChoreoAuthTokenRetriever"/>
+                    <filter xpath="$ctx:accessToken and $ctx:accessToken != ''">
+                        <then>
+                            <!-- Save to registry cache -->
+                            <property expression="$ctx:accessToken" name="conf:/choreoAccessToken" scope="registry" type="STRING"/>
+                        </then>
+                        <else>
+                            <log level="custom">
+                                <property name="DEBUG_STEP" value="TOKEN RETRIEVAL FAILED - NO ACCESS TOKEN"/>
+                            </log>
+                            <property name="alertEmail" scope="default" type="STRING" value="nabilsyifa200@gmail.com"/>
+                            <property name="alertSubject" scope="default" type="STRING" value="API Metering - Authentication Error"/>
+                            <property name="alertContentType" scope="default" type="STRING" value="text/html"/>
+                            <property name="alertContent" scope="default" type="STRING" value="&lt;html&gt;&lt;body&gt;&lt;h2&gt;Authentication Error&lt;/h2&gt;&lt;p&gt;Failed to retrieve initial Choreo access token.&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;"/>
+                            <sequence key="sq_SendEmailAlert"/>
+                            <drop/>
+                        </else>
+                    </filter>
+                </then>
+                <else>
+                    <log level="custom">
+                        <property name="DEBUG_STEP" value="Using cached token."/>
+                    </log>
+                    <property expression="$ctx:cachedToken" name="accessToken" scope="default" type="STRING"/>
+                </else>
+            </filter>
+
+            <!-- Set Headers & Payload -->
+            <header expression="fn:concat('Bearer ', $ctx:accessToken)" name="Authorization" scope="transport"/>
+            <property name="messageType" scope="axis2" type="STRING" value="application/json"/>
+            <property name="ContentType" scope="axis2" type="STRING" value="application/json"/>
+            <log level="custom">
+                <property expression="get-property('accessToken')" name="DEBUG_TOKEN"/>
+            </log>
+            <payloadFactory media-type="json">
+                <format>{ "query": "query ($dataFilter: DataFilter!, $timeFilter: TimeFilter!, $apiUsageByAppFilter: APIUsageByAppFilter!) { getAPIsUsageByApplications(timeFilter: $timeFilter, apiUsageByAppFilter: $apiUsageByAppFilter, dataFilter: $dataFilter) { apiId applicationId applicationName applicationOwner count errorCount } }", "variables": { "timeFilter": { "from": "$1", "to": "$2" }, "apiUsageByAppFilter": { "apiIds": [], "appIds": [], "subscribers": [] }, "dataFilter": { "orgId": "$3", "environmentIds": $4, "tenant": "tm.com.my" } } }</format>
+                <args>
+                    <arg evaluator="xml" expression="get-property('timeFrom')"/>
+                    <arg evaluator="xml" expression="get-property('timeTo')"/>
+                    <arg evaluator="xml" expression="get-property('orgId')"/>
+                    <arg evaluator="xml" expression="get-property('envIdsArray')"/>
+                </args>
+            </payloadFactory>
+            <log level="custom">
+                <property name="DEBUG_STEP" value="STEP 3: GraphQL pay load ready"/>
+            </log>
+
+            <!-- DEBUG 5: BEFORE Choreo call -->
+            <log level="custom">
+                <property name="DEBUG_STEP" value="STEP 4: Calling Choreo API..."/>
+            </log>
+            <call>
+                <endpoint>
+                    <http method="post" uri-template="https://choreocontrolplane.choreo.dev/93tu/insights/1.0.0/query-api">
+                        <suspendOnFailure>
+                            <initialDuration>-1</initialDuration>
+                            <progressionFactor>1</progressionFactor>
+                        </suspendOnFailure>
+                        <markForSuspension>
+                            <retriesBeforeSuspension>0</retriesBeforeSuspension>
+                        </markForSuspension>
+                    </http>
+                </endpoint>
+            </call>
+
+            <!-- Check for 401/403 Unauthorized to handle Expiration -->
+            <filter xpath="$axis2:HTTP_SC = 401 or $axis2:HTTP_SC = 403">
+                <then>
+                    <log level="custom">
+                        <property name="DEBUG_STEP" value="Choreo API Returned 401/403. Token likely expired. Regenerating token and retrying..."/>
+                    </log>
+                    <call-template target="ChoreoAuthTokenRetriever"/>
+                    <filter xpath="$ctx:accessToken and $ctx:accessToken != ''">
+                        <then>
+                            <!-- Save back to cache -->
+                            <property expression="$ctx:accessToken" name="conf:/choreoAccessToken" scope="registry" type="STRING"/>
+                            
+                            <!-- Re-configure headers & payload -->
+                            <header expression="fn:concat('Bearer ', $ctx:accessToken)" name="Authorization" scope="transport"/>
+                            <payloadFactory media-type="json">
+                                <format>{ "query": "query ($dataFilter: DataFilter!, $timeFilter: TimeFilter!, $apiUsageByAppFilter: APIUsageByAppFilter!) { getAPIsUsageByApplications(timeFilter: $timeFilter, apiUsageByAppFilter: $apiUsageByAppFilter, dataFilter: $dataFilter) { apiId applicationId applicationName applicationOwner count errorCount } }", "variables": { "timeFilter": { "from": "$1", "to": "$2" }, "apiUsageByAppFilter": { "apiIds": [], "appIds": [], "subscribers": [] }, "dataFilter": { "orgId": "$3", "environmentIds": $4, "tenant": "tm.com.my" } } }</format>
+                                <args>
+                                    <arg evaluator="xml" expression="get-property('timeFrom')"/>
+                                    <arg evaluator="xml" expression="get-property('timeTo')"/>
+                                    <arg evaluator="xml" expression="get-property('orgId')"/>
+                                    <arg evaluator="xml" expression="get-property('envIdsArray')"/>
+                                </args>
+                            </payloadFactory>
+                            <call>
+                                <endpoint>
+                                    <http method="post" uri-template="https://choreocontrolplane.choreo.dev/93tu/insights/1.0.0/query-api">
+                                        <suspendOnFailure>
+                                            <initialDuration>-1</initialDuration>
+                                            <progressionFactor>1</progressionFactor>
+                                        </suspendOnFailure>
+                                        <markForSuspension>
+                                            <retriesBeforeSuspension>0</retriesBeforeSuspension>
+                                        </markForSuspension>
+                                    </http>
+                                </endpoint>
+                            </call>
+                        </then>
+                        <else>
+                            <log level="custom">
+                                <property name="DEBUG_STEP" value="TOKEN RE-RETRIEVAL FAILED - NO ACCESS TOKEN"/>
+                            </log>
+                        </else>
+                    </filter>
+                </then>
+                <else/>
+            </filter>
+
+            <!-- DEBUG 6: AFTER Choreo response (Final Error Checking) -->
+            <filter xpath="$axis2:HTTP_SC != 200 and $axis2:HTTP_SC != 201">
+                <then>
+                    <log level="custom">
+                        <property name="ERROR_STEP" value="GraphQL API Failed"/>
+                        <property expression="$axis2:HTTP_SC" name="HTTP_STATUS"/>
+                    </log>
+                    <property name="alertEmail" scope="default" type="STRING" value="nabilsyifa200@gmail.com"/>
+                    
+                    <!-- Differentiate Authentication Error vs API Error -->
+                    <filter xpath="$axis2:HTTP_SC = 401 or $axis2:HTTP_SC = 403">
+                        <then>
+                            <property name="alertSubject" scope="default" type="STRING" value="API Metering - Authentication Error"/>
+                            <property expression="fn:concat('&lt;html&gt;&lt;body&gt;&lt;h2&gt;Authentication Error&lt;/h2&gt;&lt;p&gt;GraphQL API Call failed due to Authentication despite retry. HTTP Error Code: ', $axis2:HTTP_SC, '&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;')" name="alertContent" scope="default" type="STRING"/>
+                        </then>
+                        <else>
+                            <property name="alertSubject" scope="default" type="STRING" value="API Metering - API Error"/>
+                            <property expression="fn:concat('&lt;html&gt;&lt;body&gt;&lt;h2&gt;API Error&lt;/h2&gt;&lt;p&gt;GraphQL API Call Failed. HTTP Error Code: ', $axis2:HTTP_SC, '&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;')" name="alertContent" scope="default" type="STRING"/>
+                        </else>
+                    </filter>
+                    
+                    <property name="alertContentType" scope="default" type="STRING" value="text/html"/>
+                    <sequence key="sq_SendEmailAlert"/>
+                    <drop/>
+                </then>
+                <else/>
+            </filter>
+            
+            <log level="custom">
+                <property name="DEBUG_STEP" value="STEP 5: Choreo response received"/>
+                <property expression="get-property('axis2.request')" name="request"/>
+                <property expression="$body" name="responseBody"/>
+            </log>
+            <!-- DEBUG 7: JSON Processing -->
+            <script language="js"><![CDATA[try { 
+var jsonPayload = mc.getPayloadJSON(); 
+var usages = []; 
+if (jsonPayload.data && jsonPayload.data.getAPIsUsageByApplications) { 
+    usages = jsonPayload.data.getAPIsUsageByApplications; 
+} 
+var rows = []; 
+var callDate = mc.getProperty("callDate") || "YYYYMMDD"; 
+var callEndDate = mc.getProperty("callEndDate") || "YYYYMMDD"; 
+for (var i = 0; i < usages.length; i = i + 1) { 
+    var r = usages[i]; 
+    var row = [callDate, "000000", String(r.count || 0), "HITS", r.applicationOwner || "", r.applicationName || "", r.applicationId || "", r.apiId || "", callEndDate, "235959", "API", "API", "", "", "MYR", "", "N", "API"].join("|"); 
+    rows.push(row); 
+} 
+mc.setProperty("HAS_DATA", rows.length > 0 ? "true" : "false"); 
+mc.setProperty("CSV_ROWS", rows.join("\n")); 
+mc.setProperty("ROW_COUNT", new java.lang.String(rows.length)); 
+
+} catch(e) { 
+    mc.getServiceLog().error("JSON processing error: " + e.message); 
+    mc.setProperty("HAS_DATA", "false"); 
+    mc.setProperty("ERROR_MSG", e.message); 
+}]]></script>
+            <log level="custom">
+                <property name="DEBUG_STEP" value="STEP 6: JSON processed"/>
+                <property expression="get-property('HAS_DATA')" name="HAS_DATA"/>
+                <property expression="get-property('ROW_COUNT')" name="ROW_COUNT"/>
+                <property expression="get-property('ERROR_MSG')" name="ERROR_MSG"/>
+            </log>
+            
+            <!-- Check for Structure/Processing Error -->
+            <filter xpath="get-property('ERROR_MSG') and get-property('ERROR_MSG') != ''">
+                <then>
+                    <property name="alertEmail" scope="default" type="STRING" value="nabilsyifa200@gmail.com"/>
+                    <property name="alertSubject" scope="default" type="STRING" value="API Metering - Structure Error"/>
+                    <property name="alertContentType" scope="default" type="STRING" value="text/html"/>
+                    <property expression="fn:concat('&lt;html&gt;&lt;body&gt;&lt;h2&gt;Structure Error&lt;/h2&gt;&lt;p&gt;Failed to parse/process JSON payload: ', get-property('ERROR_MSG'), '&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;')" name="alertContent" scope="default" type="STRING"/>
+                    <sequence key="sq_SendEmailAlert"/>
+                    <drop/>
+                </then>
+                <else/>
+            </filter>
+            <!-- Pre-compute File Name for Email + Output -->
+            <property expression="fn:concat('Choreo_APIMetering_HOBS_', get-property('timestamp'), '.csv')" name="fileName" scope="default" type="STRING"/>
+            <!-- Generate SUCCESS_EMAIL_HTML via XQuery -->
+            <!-- Save current payload to safe property -->
+            <enrich>
+                <source clone="true" type="body"/>
+                <target property="ORIGINAL_PAYLOAD" type="property"/>
+            </enrich>
+            <xquery key="gov:xquery/xq_generate_html_APIMetering.xqy">
+                <variable expression="get-property('callDate')" name="callDate" type="STRING"/>
+                <variable expression="get-property('ROW_COUNT')" name="rowCount" type="STRING"/>
+                <variable expression="get-property('fileName')" name="fileName" type="STRING"/>
+            </xquery>
+            <property expression="$body/*" name="SUCCESS_EMAIL_HTML" scope="default" type="STRING"/>
+            <enrich>
+                <source clone="true" property="ORIGINAL_PAYLOAD" type="property"/>
+                <target type="body"/>
+            </enrich>
+            <property name="alertEmail" scope="default" type="STRING" value="nabilsyifa200@gmail.com"/>
+            <property name="alertSubject" scope="default" type="STRING" value="API Metering - Success Notification"/>
+            <property name="alertContentType" scope="default" type="STRING" value="text/html"/>
+            <property expression="get-property('SUCCESS_EMAIL_HTML')" name="alertContent" scope="default" type="STRING"/>
+            <log level="custom">
+                <property name="DEBUG_STEP" value="Sending Success Email Alert"/>
+            </log>
+            <!-- Call email sequence -->
+            <sequence key="sq_SendEmailAlert"/>
+            <!-- DEBUG 8: CSV Generation -->
+            <filter regex="true" source="get-property('HAS_DATA')">
+                <then>
+                    <log level="custom">
+                        <property name="DEBUG_STEP" value="STEP 7: Generating CSV..."/>
+                    </log>
+                    <payloadFactory media-type="text">
+                        <format>
+							callDate|callTime|elapsUnit|elapsUom|sourceIdentifier|customField1|customField2|destinationIdentifier|callEndDate|callEndTime|callType|serviceType|customField7|charge|currency|customField6|preRatedIndicator|cdrType
+							$1
+						</format>
+                        <args>
+                            <arg evaluator="xml" expression="get-property('CSV_ROWS')"/>
+                        </args>
+                    </payloadFactory>
+                    <property expression="fn:concat('Choreo_APIMetering_HOBS_', get-property('timestamp'), '.csv')" name="fileName" scope="default" type="STRING"/>
+                    <log level="custom">
+                        <property name="DEBUG_STEP" value="STEP 8: Writing file"/>
+                        <property expression="get-property('fileName')" name="fileName"/>
+                    </log>
+                    <!-- Send to folder -->
+                    <send>
+                        <endpoint>
+                            <!-- ==== PRODUCTION SFTP INTEGRATION (REPLACE THE VFS URL BELOW WHEN READY) ====
+                            <address uri="vfs:sftp://sftp_user:sftp_password@192.168.1.100:22/upload_directory/${fileName}">
+                                <suspendOnFailure>
+                                    <initialDuration>-1</initialDuration>
+                                    <progressionFactor>1</progressionFactor>
+                                </suspendOnFailure>
+                            </address>
+                            ==== END SFTP INTEGRATION ==== -->
+                            
+                            <address uri="vfs:file:///C:/Users/MuhammadNabilBinRusl/temp/${fileName}">
+                                <suspendOnFailure>
+                                    <initialDuration>-1</initialDuration>
+                                    <progressionFactor>1</progressionFactor>
+                                </suspendOnFailure>
+                                <markForSuspension>
+                                    <retriesBeforeSuspension>0</retriesBeforeSuspension>
+                                </markForSuspension>
+                            </address>
+                        </endpoint>
+                    </send>
+                </then>
+                <else>
+                    <log level="custom">
+                        <property name="DEBUG_STEP" value="STEP 9: No data found"/>
+                    </log>
+                </else>
+            </filter>
+        </inSequence>
+        <outSequence>
+            <log level="custom">
+                <property name="DEBUG_FINAL" value="=== PROXY COMPLETED ==="/>
+            </log>
+        </outSequence>
+        <faultSequence>
+            <log level="custom">
+                <property name="ERROR_STEP" value="Proxy Flow or File Transfer Failed"/>
+                <property expression="get-property('ERROR_CODE')" name="ErrorCode"/>
+                <property expression="get-property('ERROR_MESSAGE')" name="ErrorDetail"/>
+            </log>
+            <property name="alertEmail" scope="default" type="STRING" value="nabilsyifa200@gmail.com"/>
+            <property name="alertSubject" scope="default" type="STRING" value="API Metering - System Exception Alert"/>
+            <property name="alertContentType" scope="default" type="STRING" value="text/html"/>
+            <property expression="fn:concat('&lt;html&gt;&lt;body&gt;&lt;h2&gt;Exception Occurred&lt;/h2&gt;&lt;p&gt;File Transfer or Proxy Flow Failed!&lt;/p&gt;&lt;p&gt;Details: ', get-property('ERROR_MESSAGE'), '&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;')" name="alertContent" scope="default" type="STRING"/>
+            <sequence key="sq_SendEmailAlert"/>
+            <drop/>
+        </faultSequence>
+    </target>
+</proxy>
