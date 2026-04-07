@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<sequence name="sq_SendEmailAlert" trace="disable" xmlns="http://ws.apache.org/ns/synapse">
+    <log level="custom">
+        <property name="EMAIL_ALERT" value="Sending Alert Email"/>
+    </log>
+    <property expression="get-property('alertContentType')" name="actualContentType" scope="default" type="STRING"/>
+    <filter xpath="not(boolean($ctx:actualContentType))">
+        <then>
+            <property name="actualContentType" scope="default" type="STRING" value="text/plain"/>
+        </then>
+        <else/>
+    </filter>
+    <email.send configKey="EMAIL_CONNECTION_1">
+        <from>nabilsyifa200@gmail.com</from>
+        <to>{get-property('alertEmail')}</to>
+        <subject>{get-property('alertSubject')}</subject>
+        <content>{get-property('alertContent')}</content>
+        <contentType>{get-property('actualContentType')}</contentType>
+    </email.send>
+</sequence>
