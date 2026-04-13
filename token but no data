@@ -1,1 +1,116 @@
-<?xml version="1.0" encoding="UTF-8"?> <proxy name="PS_APIMetering_Online" startOnLoad="true" transports="http https" xmlns="http://ws.apache.org/ns/synapse"> <target> <inSequence> <!-- 1. Calculate T-1 date and timestamps --> <script language="js"><![CDATA[ var d = new Date(); d.setDate(d.getDate() - 1); function pad(n){ return n < 10 ? '0' + n : n; } var y = d.getFullYear(); var m = pad(d.getMonth() + 1); var day = pad(d.getDate()); var ymd = y + m + day; mc.setProperty("callDate", ymd); mc.setProperty("callTime", "000000"); mc.setProperty("callEndDate", ymd); mc.setProperty("callEndTime", "235959"); mc.setProperty("timeFrom", y + "-" + m + "-" + day + "T00:00:00.000+08:00"); mc.setProperty("timeTo", y + "-" + m + "-" + day + "T23:59:59.999+08:00"); var now = new Date(); var timestamp = pad(now.getHours()) + pad(now.getMinutes()) + pad(now.getSeconds()); mc.setProperty("timestamp", timestamp); ]]></script> <!-- 2. Static configuration --> <property name="orgId" scope="default" type="STRING" value="e379bc54-1a05-466d-83a3-f921d51ee6d2"/> <property name="envIdsArray" scope="default" type="STRING" value='["1c89f011-9380-4d65-9142-75ec8a55dff3"]'/> <property name="messageType" scope="axis2" type="STRING" value="application/json"/> <property name="ContentType" scope="axis2" type="STRING" value="application/json"/> <!-- 3. Request dynamic token --> <payloadFactory media-type="text"> <format>grant_type=client_credentials&amp;orgHandle=smartbizapitm&amp;scope=apim:api_managees_in</format> <args/> </payloadFactory> <property name="messageType" scope="axis2" value="application/x-www-form-urlencoded"/> <property name="ContentType" scope="axis2" value="application/x-www-form-urlencoded"/> <header name="Authorization" scope="transport" value="Basic ....."/> <call> <endpoint> <http method="post" uri-template="https://sts.choreo.dev/oauth2/token"/> </endpoint> </call> <!-- 4. Extract token --> <property name="accessToken" expression="json-eval($.access_token)" scope="default" type="STRING"/> <log level="custom"> <property name="TOKEN_RECEIVED" value="Access token generated"/> </log> <!-- 5. GraphQL Payload --> <header name="Authorization" scope="transport" expression="fn:concat('Bearer ', get-property('accessToken'))"/> <payloadFactory media-type="json"> <format> { "query": "query ($dataFilter: DataFilter!, $timeFilter: TimeFilter!, $apiUsageByAppFilter: APIUsageByAppFilter!) { getAPIsUsageByApplications(timeFilter: $timeFilter apiUsageByAppFilter: $apiUsageByAppFilter dataFilter: $dataFilter) { apiId applicationId applicationName applicationOwner count errorCount } }", "variables": { "timeFilter": { "from": "$1", "to": "$2" }, "apiUsageByAppFilter": { "apiIds": [], "appIds": [], "subscribers": [] }, "dataFilter": { "orgId": "$3", "environmentIds": $4, "tenant": "tm.com.my" } } } </format> <args> <arg evaluator="xml" expression="get-property('timeFrom')"/> <arg evaluator="xml" expression="get-property('timeTo')"/> <arg evaluator="xml" expression="get-property('orgId')"/> <arg evaluator="xml" expression="get-property('envIdsArray')"/> </args> </payloadFactory> <!-- 6. Call Choreo endpoint --> <call> <endpoint> <http method="post" uri-template="https://choreocontrolplane.choreo.dev/93tu/insights/1.0.0/query-api"> <suspendOnFailure> <initialDuration>-1</initialDuration> <progressionFactor>1</progressionFactor> </suspendOnFailure> <markForSuspension> <retriesBeforeSuspension>0</retriesBeforeSuspension> </markForSuspension> </http> </endpoint> </call> <!-- 7. Script to convert JSON → CSV --> <script language="js"><![CDATA[ try { var body = mc.getPayloadJSON(); var usages = body.data && body.data.getAPIsUsageByApplications ? body.data.getAPIsUsageByApplications : []; var rows = []; var callDate = mc.getProperty("callDate") || "YYYYMMDD"; var callEndDate = mc.getProperty("callEndDate") || "YYYYMMDD"; for (var i = 0; i < usages.length; i++) { var r = usages[i]; rows.push([ callDate, "000000", String(r.count || 0), "HITS", r.applicationOwner || "", r.applicationName || "", r.applicationId || "", r.apiId || "", callEndDate, "235959", "API", "API", "", "", "MYR", "", "N", "API" ].join("|")); } mc.setProperty("HAS_DATA", rows.length > 0 ? "true" : "false"); mc.setProperty("CSV_ROWS", rows.join("\n")); } catch(e) { mc.getServiceLog().error("Data mapping error: " + e.message); mc.setProperty("HAS_DATA", "false"); } ]]></script> <!-- 8. Continue only if data exists --> <filter regex="true" source="get-property('HAS_DATA')"> <then> <payloadFactory media-type="text"> <format> callDate|callTime|elapsUnit|elapsUom|sourceIdentifier|customField1|customField2|destinationIdentifier|callEndDate|callEndTime|callType|serviceType|customField7|charge|currency|customField6|preRatedIndicator|cdrType $1 </format> <args> <arg evaluator="xml" expression="get-property('CSV_ROWS')"/> </args> </payloadFactory> <!-- File name with timestamp --> <property expression="fn:concat('CDR_API_', get-property('callDate'), '_', get-property('timestamp'), '.csv')" name="fileName" scope="default" type="STRING"/> <!-- Local file write --> <clone sequential="true"> <target> <sequence> <send> <endpoint> <address uri="vfs:file:///C:/Users/MuhammadNabilBinRusl/temp/${fileName}"> <suspendOnFailure> <initialDuration>-1</initialDuration> <progressionFactor>1</progressionFactor> </suspendOnFailure> <markForSuspension> <retriesBeforeSuspension>0</retriesBeforeSuspension> </markForSuspension> </address> </endpoint> </send> </sequence> </target> </clone> <log level="custom"> <property name="INFO" value="CSV generated and uploaded successfully"/> </log> </then> <else> <log level="custom"> <property name="INFO" value="No data – CSV not generated"/> </log> <drop/> </else> </filter> </inSequence> <outSequence/> <faultSequence> <drop/> </faultSequence> </target> </proxy> <?xml version="1.0" encoding="UTF-8"?> <task class="org.apache.synapse.startup.tasks.MessageInjector" group="synapse.simple.quartz" name="SBAScheduler_APIMetering" xmlns="http://ws.apache.org/ns/synapse"> <trigger cron="*/10 * * * * ?"/> <property name="proxyName" value="PS_APIMetering_Online" xmlns:task="http://www.wso2.org/products/wso2commons/tasks"/> <property name="message" xmlns:task="http://www.wso2.org/products/wso2commons/tasks"> <root> <orgId>e379bc54-1a05-466d-83a3-f921d51ee6d2</orgId> <environmentIds>1c89f011-9380-4d65-9142-75ec8a55dff3</environmentIds> </root> </property> <property name="injectTo" value="proxy" xmlns:task="http://www.wso2.org/products/wso2commons/tasks"/> </task>
+<?xml version="1.0" encoding="UTF-8"?>
+<proxy name="PS_APIMetering_Online" startOnLoad="true" transports="http https" xmlns="http://ws.apache.org/ns/synapse">
+	<target>
+		<inSequence>
+			<!-- 1. Calculate T-1 date and timestamps -->
+			<script language="js"><![CDATA[ var d = new Date(); d.setDate(d.getDate() - 1); function pad(n){ return n < 10 ? '0' + n : n; } var y = d.getFullYear(); var m = pad(d.getMonth() + 1); var day = pad(d.getDate()); var ymd = y + m + day; mc.setProperty("callDate", ymd); mc.setProperty("callTime", "000000"); mc.setProperty("callEndDate", ymd); mc.setProperty("callEndTime", "235959"); mc.setProperty("timeFrom", y + "-" + m + "-" + day + "T00:00:00.000+08:00"); mc.setProperty("timeTo", y + "-" + m + "-" + day + "T23:59:59.999+08:00"); var now = new Date(); var timestamp = pad(now.getHours()) + pad(now.getMinutes()) + pad(now.getSeconds()); mc.setProperty("timestamp", timestamp); ]]></script>
+			<!-- 2. Static configuration -->
+			<property name="orgId" scope="default" type="STRING" value="e379bc54-1a05-466d-83a3-f921d51ee6d2"/>
+			<property name="envIdsArray" scope="default" type="STRING" value='["1c89f011-9380-4d65-9142-75ec8a55dff3"]'/>
+			<property name="messageType" scope="axis2" type="STRING" value="application/json"/>
+			<property name="ContentType" scope="axis2" type="STRING" value="application/json"/>
+			<!-- 3. Request dynamic token -->
+			<payloadFactory media-type="text">
+				<format>grant_type=client_credentials&amp;orgHandle=smartbizapitm&amp;scope=apim:api_managees_in</format>
+				<args/>
+			</payloadFactory>
+			<property name="messageType" scope="axis2" value="application/x-www-form-urlencoded"/>
+			<property name="ContentType" scope="axis2" value="application/x-www-form-urlencoded"/>
+			<header name="Authorization" scope="transport" value="Basic ....."/>
+			<call>
+				<endpoint>
+					<http method="post" uri-template="https://sts.choreo.dev/oauth2/token"/>
+				</endpoint>
+			</call>
+			<!-- 4. Extract token -->
+			<property name="accessToken" expression="json-eval($.access_token)" scope="default" type="STRING"/>
+			<log level="custom">
+				<property name="TOKEN_RECEIVED" value="Access token generated"/>
+			</log>
+			<!-- 5. GraphQL Payload -->
+			<header name="Authorization" scope="transport" expression="fn:concat('Bearer ', get-property('accessToken'))"/>
+			<payloadFactory media-type="json">
+				<format> { "query": "query ($dataFilter: DataFilter!, $timeFilter: TimeFilter!, $apiUsageByAppFilter: APIUsageByAppFilter!) { getAPIsUsageByApplications(timeFilter: $timeFilter apiUsageByAppFilter: $apiUsageByAppFilter dataFilter: $dataFilter) { apiId applicationId applicationName applicationOwner count errorCount } }", "variables": { "timeFilter": { "from": "$1", "to": "$2" }, "apiUsageByAppFilter": { "apiIds": [], "appIds": [], "subscribers": [] }, "dataFilter": { "orgId": "$3", "environmentIds": $4, "tenant": "tm.com.my" } } } </format>
+				<args>
+					<arg evaluator="xml" expression="get-property('timeFrom')"/>
+					<arg evaluator="xml" expression="get-property('timeTo')"/>
+					<arg evaluator="xml" expression="get-property('orgId')"/>
+					<arg evaluator="xml" expression="get-property('envIdsArray')"/>
+				</args>
+			</payloadFactory>
+			<!-- 6. Call Choreo endpoint -->
+			<call>
+				<endpoint>
+					<http method="post" uri-template="https://choreocontrolplane.choreo.dev/93tu/insights/1.0.0/query-api">
+						<suspendOnFailure>
+							<initialDuration>-1</initialDuration>
+							<progressionFactor>1</progressionFactor>
+						</suspendOnFailure>
+						<markForSuspension>
+							<retriesBeforeSuspension>0</retriesBeforeSuspension>
+						</markForSuspension>
+					</http>
+				</endpoint>
+			</call>
+			<!-- 7. Script to convert JSON → CSV -->
+			<script language="js"><![CDATA[ try { var body = mc.getPayloadJSON(); var usages = body.data && body.data.getAPIsUsageByApplications ? body.data.getAPIsUsageByApplications : []; var rows = []; var callDate = mc.getProperty("callDate") || "YYYYMMDD"; var callEndDate = mc.getProperty("callEndDate") || "YYYYMMDD"; for (var i = 0; i < usages.length; i++) { var r = usages[i]; rows.push([ callDate, "000000", String(r.count || 0), "HITS", r.applicationOwner || "", r.applicationName || "", r.applicationId || "", r.apiId || "", callEndDate, "235959", "API", "API", "", "", "MYR", "", "N", "API" ].join("|")); } mc.setProperty("HAS_DATA", rows.length > 0 ? "true" : "false"); mc.setProperty("CSV_ROWS", rows.join("\n")); } catch(e) { mc.getServiceLog().error("Data mapping error: " + e.message); mc.setProperty("HAS_DATA", "false"); } ]]></script>
+			<!-- 8. Continue only if data exists -->
+			<filter regex="true" source="get-property('HAS_DATA')">
+				<then>
+					<payloadFactory media-type="text">
+						<format> callDate|callTime|elapsUnit|elapsUom|sourceIdentifier|customField1|customField2|destinationIdentifier|callEndDate|callEndTime|callType|serviceType|customField7|charge|currency|customField6|preRatedIndicator|cdrType $1 </format>
+						<args>
+							<arg evaluator="xml" expression="get-property('CSV_ROWS')"/>
+						</args>
+					</payloadFactory>
+					<!-- File name with timestamp -->
+					<property expression="fn:concat('CDR_API_', get-property('callDate'), '_', get-property('timestamp'), '.csv')" name="fileName" scope="default" type="STRING"/>
+					<!-- Local file write -->
+					<clone sequential="true">
+						<target>
+							<sequence>
+								<send>
+									<endpoint>
+										<address uri="vfs:file:///C:/Users/MuhammadNabilBinRusl/temp/${fileName}">
+											<suspendOnFailure>
+												<initialDuration>-1</initialDuration>
+												<progressionFactor>1</progressionFactor>
+											</suspendOnFailure>
+											<markForSuspension>
+												<retriesBeforeSuspension>0</retriesBeforeSuspension>
+											</markForSuspension>
+										</address>
+									</endpoint>
+								</send>
+							</sequence>
+						</target>
+					</clone>
+					<log level="custom">
+						<property name="INFO" value="CSV generated and uploaded successfully"/>
+					</log>
+				</then>
+				<else>
+					<log level="custom">
+						<property name="INFO" value="No data – CSV not generated"/>
+					</log>
+					<drop/>
+				</else>
+			</filter>
+		</inSequence>
+		<outSequence/>
+		<faultSequence>
+			<drop/>
+		</faultSequence>
+	</target>
+</proxy> <?xml version="1.0" encoding="UTF-8"?>
+<task class="org.apache.synapse.startup.tasks.MessageInjector" group="synapse.simple.quartz" name="SBAScheduler_APIMetering" xmlns="http://ws.apache.org/ns/synapse">
+	<trigger cron="*/10 * * * * ?"/>
+	<property name="proxyName" value="PS_APIMetering_Online" xmlns:task="http://www.wso2.org/products/wso2commons/tasks"/>
+	<property name="message" xmlns:task="http://www.wso2.org/products/wso2commons/tasks">
+		<root>
+			<orgId>e379bc54-1a05-466d-83a3-f921d51ee6d2</orgId>
+			<environmentIds>1c89f011-9380-4d65-9142-75ec8a55dff3</environmentIds>
+		</root>
+	</property>
+	<property name="injectTo" value="proxy" xmlns:task="http://www.wso2.org/products/wso2commons/tasks"/>
+</task>
